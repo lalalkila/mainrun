@@ -228,7 +228,7 @@ def main():
     hyperparams_dict = vars(args)
     logger.log("hyperparameters_configured", **hyperparams_dict)
     
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    device = "cuda" if torch.cuda.is_available() else ("mps" if torch.mps.is_available() else "cpu")
     logger.log("device_info", device=device)
 
     train_titles, val_titles = get_titles(args.num_titles, args.seed, args.val_frac)
