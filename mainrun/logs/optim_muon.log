@@ -1,0 +1,4 @@
+{"event": "hyperparameters_configured", "timestamp": 1783694298.6916635, "block_size": 128, "batch_size": 64, "vocab_size": 16000, "n_layer": 6, "n_head": 8, "d_model": 512, "dropout": 0.1, "lr": 0.006, "weight_decay": 0.0, "evals_per_epoch": 3, "epochs": 7, "seed": 1337, "num_titles": 100000, "val_frac": 0.1, "log_file": "./logs/optim_muon.log"}
+{"event": "device_info", "timestamp": 1783694298.6921287, "device": "cpu"}
+{"event": "dataset_info", "timestamp": 1783694308.9707835, "titles_count": 90000, "epochs": 7, "batches_per_epoch": 142, "tokens_per_epoch": 1168720, "vocab_size": 16000}
+{"event": "model_info", "timestamp": 1783694310.2009313, "parameters_count": 27172864}
