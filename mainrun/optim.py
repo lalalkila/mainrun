@@ -8,7 +8,7 @@ from collections.abc import MutableMapping
 import torch
 from torch import Tensor
 
-from torch.optimizer import (
+from torch.optim.optimizer import (
     _disable_dynamo_if_unsupported,
     _params_doc,
     _to_scalar,
