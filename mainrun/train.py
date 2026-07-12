@@ -12,7 +12,7 @@ from tokenizers import Tokenizer, models, trainers, pre_tokenizers, decoders
 from tqdm import tqdm
 import structlog
 
-import optim
+from modules import optim, token
 
 @dataclass
 class Hyperparameters:
@@ -102,13 +102,21 @@ def iter_full_split(split_ids: torch.Tensor, block_size: int, batch_size: int, d
         y = batch[1:].view(batch_size, block_size).to(device)
         yield x, y
 
-def train_tokenizer(titles: list[str], vocab_size: int, unk_token: str = "<unk>", pad_token: str = "<pad>", eos_token: str = "<eos>") -> Tokenizer:
+def train_tokenizer(
+    titles: list[str],
+    vocab_size: int,
+    unk_token: str = "<unk>",
+    pad_token: str = "<pad>",
+    eos_token: str = "<eos>",
+    caps_token: str = "<cps>",
+    start_token: str = "<ttl>",
+) -> Tokenizer:
     tokenizer = Tokenizer(models.BPE(unk_token=unk_token))
     tokenizer.pre_tokenizer = pre_tokenizers.ByteLevel()
     tokenizer.decoder = decoders.ByteLevel()
     trainer = trainers.BpeTrainer(
         vocab_size=vocab_size,
-        special_tokens=[pad_token, eos_token, unk_token]
+        special_tokens=[pad_token, eos_token, unk_token, caps_token, start_token]
     )
     tokenizer.train_from_iterator(titles, trainer)
     return tokenizer
@@ -236,9 +244,16 @@ def main():
     train_titles, val_titles = get_titles(args.num_titles, args.seed, args.val_frac)
     
     eos_token = "<eos>"
-    tok = BPETokenizer(train_tokenizer(train_titles+val_titles, args.vocab_size, eos_token=eos_token))
+    caps_token = "<caps>"
+    start_token = "<strt>"
+    tok = BPETokenizer(train_tokenizer(train_titles+val_titles, args.vocab_size, eos_token=eos_token, caps_token=caps_token, start_token=start_token))
+    
+    train_titles = token.apply_case(train_titles, start_token=start_token, caps_token=caps_token)
+    val_titles = token.apply_case(val_titles, start_token=start_token, caps_token=caps_token)
+    
     train_text = eos_token.join(train_titles) + eos_token
     val_text = eos_token.join(val_titles) + eos_token
+    
     train_ids = torch.tensor(tok.encode(train_text), dtype=torch.long)
     val_ids = torch.tensor(tok.encode(val_text), dtype=torch.long)
     
