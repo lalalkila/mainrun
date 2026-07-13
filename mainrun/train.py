@@ -4,6 +4,7 @@ from dataclasses import dataclass
 import json
 from pathlib import Path
 
+import wandb
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
@@ -294,6 +295,12 @@ def main():
         model.train()
         return losses / len(val_text)
 
+    run = wandb.init(
+        entity="duylam-lee-the-university-of-sydney",
+        project="mainrun",
+        config=cfg.__dict__
+    )
+    
     ptr = 0
     step = 0
     t0 = time.time()
@@ -309,20 +316,27 @@ def main():
             scheduler.step()
 
             elapsed = time.time() - t0
+            
             logger.log("training_step",
-                      step=step,
-                      max_steps=max_steps,
-                      loss=loss.item(),
-                      elapsed_time=elapsed,
-                      prnt=False)
+                    step=step,
+                    max_steps=max_steps,
+                    loss=loss.item(),
+                    elapsed_time=elapsed,
+                    prnt=False)
+            run.log({
+                "loss" : loss.item()
+            })
 
             if step == 1 or step % eval_interval == 0 or step == max_steps:
                 val_loss = evaluate()
                 logger.log("validation_step",
-                          step=step,
-                          max_steps=max_steps,
-                          loss=val_loss,
-                          elapsed_time=elapsed)
+                        step=step,
+                        max_steps=max_steps,
+                        loss=val_loss,
+                        elapsed_time=elapsed)
+                run.log({
+                    "val_loss" : val_loss
+                })
 
 if __name__ == "__main__":
     try:
