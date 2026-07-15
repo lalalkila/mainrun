@@ -310,7 +310,8 @@ def main():
         n_head     = args.n_head,
         d_model    = args.d_model,
         dropout    = args.dropout,
-        qk_gain    = args.qk_gain
+        qk_gain    = args.qk_gain,
+        n_kv_head  = args.n_kv_heads
     )
     model = GPT(cfg).to(device)
     model_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
