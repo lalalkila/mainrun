@@ -28,6 +28,8 @@ class Hyperparameters:
     weight_decay: float = 0.0
     evals_per_epoch: int = 3
     
+    qk_gain : float = 3.0
+    
     epochs: int = 7
     seed: int = 1337
     num_titles: int = 100_000
@@ -145,6 +147,7 @@ class GPTConfig:
     n_head: int
     d_model: int
     dropout: float
+    qk_gain: float
 
 class CausalSelfAttention(nn.Module):
     def __init__(self, cfg: GPTConfig):
@@ -157,11 +160,17 @@ class CausalSelfAttention(nn.Module):
         self.attn_drop = nn.Dropout(cfg.dropout)
         self.resid_drop= nn.Dropout(cfg.dropout)
         self.register_buffer("tril", torch.tril(torch.ones(cfg.block_size, cfg.block_size)))
+        
+        # QK-gain param
+        self.q_gain = nn.Parameter(
+            torch.full((self.n_head), cfg.qk_gain, dtype=torch.float32)
+        )
 
     def forward(self, x: torch.Tensor):
         B, T, C = x.size()
         qkv = self.qkv(x).view(B, T, 3, self.n_head, self.head_dim).transpose(1, 3)
         q, k, v = qkv[..., 0, :, :], qkv[..., 1, :, :], qkv[..., 2, :, :]
+        q = q * self.qk_gain.to(dtype=q.dtype)[None, None, :, None]
         att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
         att = att.masked_fill(self.tril[:T, :T] == 0, float("-inf"))
         att = F.softmax(att, dim=-1)
@@ -286,6 +295,7 @@ def main():
         n_head     = args.n_head,
         d_model    = args.d_model,
         dropout    = args.dropout,
+        qk_gain    = args.qk_gain
     )
     model = GPT(cfg).to(device)
     model_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
