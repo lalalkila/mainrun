@@ -32,7 +32,7 @@ class Hyperparameters:
     seed: int = 1337
     num_titles: int = 100_000
     val_frac: float = 0.10
-    log_file: str = "./logs/mainrun_token_caseops.log"
+    log_file: str = "./logs/mainrun_token_sweep"
 
 def configure_logging(log_file: str):
     Path(log_file).parent.mkdir(parents=True, exist_ok=True)
@@ -230,11 +230,22 @@ class GPT(nn.Module):
 
 def main():
     args = Hyperparameters()
+    
+    run = wandb.init(
+        entity="duylam-lee-the-university-of-sydney",
+        project="mainrun",
+        config=vars(args)
+    )
+    
+    for k, v in run.config.items():
+        if hasattr(args, k):
+            setattr(args, k, v)
+    
     torch.manual_seed(args.seed)
     random.seed(args.seed)
     
     global logger
-    logger = configure_logging(args.log_file)
+    logger = configure_logging(args.log_file + f"_lr{args.lr}_decay{args.weight_decay}_dropout{args.batch_size}.log")
     
     hyperparams_dict = vars(args)
     logger.log("hyperparameters_configured", **hyperparams_dict)
@@ -294,12 +305,6 @@ def main():
                 losses += loss.item()
         model.train()
         return losses / len(val_text)
-
-    run = wandb.init(
-        entity="duylam-lee-the-university-of-sydney",
-        project="mainrun",
-        config=cfg.__dict__
-    )
     
     ptr = 0
     step = 0

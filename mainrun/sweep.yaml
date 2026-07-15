@@ -1,0 +1,31 @@
+program: train.py
+project: mainrun
+entity: duylam-lee-the-university-of-sydney
+method: bayes
+metric:
+  name: val_loss
+  goal: minimize
+
+early_terminate:
+  type: hyperband
+  min_iter: 1
+  eta: 2
+
+parameters:
+  lr:
+    min: 1e-4
+    max: 1e-2
+    distribution: log_uniform_values
+  weight_decay:
+    values: [0.0, 0.01, 0.1]
+  dropout:
+    values: [0.0, 0.1, 0.2]
+  batch_size:
+    values: [16, 32, 64]
+  epochs:
+    value: 4
+
+command:
+  - ${env}
+  - python3
+  - train.py
