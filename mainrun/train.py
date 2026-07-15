@@ -18,17 +18,18 @@ from modules import optim, token
 @dataclass
 class Hyperparameters:
     block_size: int = 128
-    batch_size: int = 64
+    batch_size: int = 16
     vocab_size: int = 16_000
     n_layer: int = 6
     n_head: int = 8
     d_model: int = 512
-    dropout: float = 0.1
-    lr: float = 6e-3
-    weight_decay: float = 0.0
+    dropout: float = 0.0
+    lr: float = 7e-3
+    weight_decay: float = 0.1
     evals_per_epoch: int = 3
     
     qk_gain : float = 3.0
+    n_kv_heads: int = 4
     
     epochs: int = 7
     seed: int = 1337
