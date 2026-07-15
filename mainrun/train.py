@@ -18,7 +18,7 @@ from modules import optim, token
 @dataclass
 class Hyperparameters:
     block_size: int = 128
-    batch_size: int = 16
+    batch_size: int = 64
     vocab_size: int = 16_000
     n_layer: int = 6
     n_head: int = 8
@@ -149,14 +149,21 @@ class GPTConfig:
     d_model: int
     dropout: float
     qk_gain: float
+    n_kv_head: int
 
 class CausalSelfAttention(nn.Module):
     def __init__(self, cfg: GPTConfig):
         super().__init__()
         assert cfg.d_model % cfg.n_head == 0
+        assert cfg.n_head % cfg.n_kv_head == 0
         self.head_dim = cfg.d_model // cfg.n_head
-        self.n_head   = cfg.n_head
+        self.n_head = cfg.n_head
+        self.n_kv_head = cfg.n_kv_head
+        self.n_rep = self.n_head // self.n_kv_head
         self.qkv = nn.Linear(cfg.d_model, 3 * cfg.d_model)
+        self.q_proj = nn.Linear(cfg.d_model, self.n_head * self.head_dim)
+        self.k_proj = nn.Linear(cfg.d_model, self.n_kv_head * self.head_dim)
+        self.v_proj = nn.Linear(cfg.d_model, self.n_kv_head * self.head_dim)
         self.proj = nn.Linear(cfg.d_model, cfg.d_model)
         self.attn_drop = nn.Dropout(cfg.dropout)
         self.resid_drop= nn.Dropout(cfg.dropout)
@@ -169,10 +176,17 @@ class CausalSelfAttention(nn.Module):
 
     def forward(self, x: torch.Tensor):
         B, T, C = x.size()
-        qkv = self.qkv(x).view(B, T, 3, self.n_head, self.head_dim).transpose(1, 3)
-        q, k, v = qkv[..., 0, :, :], qkv[..., 1, :, :], qkv[..., 2, :, :]
-        q = q * self.q_gain.to(dtype=q.dtype)[None, :, None, None]
-        att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
+        # qkv = self.qkv(x).view(B, T, 3, self.n_head, self.head_dim).transpose(1, 3)
+        # q, k, v = qkv[..., 0, :, :], qkv[..., 1, :, :], qkv[..., 2, :, :]
+        # q = q * self.q_gain.to(dtype=q.dtype)[None, :, None, None]
+        q = self.q_proj(x).view(B, T, self.n_head, self.head_dim).transpose(1, 2)
+        k = self.k_proj(x).view(B, T, self.n_kv_head, self.head_dim).transpose(1, 2)
+        v = self.v_proj(x).view(B, T, self.n_kv_head, self.head_dim).transpose(1, 2)
+
+        k = k.repeat_interleave(self.n_rep, dim=1)
+        v = v.repeat_interleave(self.n_rep, dim=1)
+        
+        att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(self.head_dim))
         att = att.masked_fill(self.tril[:T, :T] == 0, float("-inf"))
         att = F.softmax(att, dim=-1)
         att = self.attn_drop(att)
