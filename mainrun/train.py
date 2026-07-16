@@ -1,3 +1,7 @@
+from turtle import forward
+
+from numpy import dtype
+
 import utils
 import math, random, time
 from dataclasses import dataclass
@@ -36,7 +40,7 @@ class Hyperparameters:
     seed: int = 1337
     num_titles: int = 100_000
     val_frac: float = 0.10
-    log_file: str = "./logs/mainrun_emb_rope"
+    log_file: str = "./logs/mainrun_transformer_modernsetup"
 
 def configure_logging(log_file: str):
     Path(log_file).parent.mkdir(parents=True, exist_ok=True)
@@ -196,16 +200,25 @@ class CausalSelfAttention(nn.Module):
         self.register_buffer("rope_cos", rope_cos, persistent=False)
         self.register_buffer("rope_sin", rope_sin, persistent=False)
         
+        # ------
+        # QK optimisation
+        # ------
         # QK-gain param
         self.q_gain = nn.Parameter(
             torch.full((self.n_head,), cfg.qk_gain, dtype=torch.float32)
         )
+        # QK norm
+        self.q_norm = nn.RMSNorm(self.head_dim, elementwise_affine=False)
+        self.k_norm = nn.RMSNorm(self.head_dim, elementwise_affine=False)
 
     def forward(self, x: torch.Tensor):
         B, T, C = x.size()
         q = self.q_proj(x).view(B, T, self.n_head, self.head_dim).transpose(1, 2)
         k = self.k_proj(x).view(B, T, self.n_kv_head, self.head_dim).transpose(1, 2)
         v = self.v_proj(x).view(B, T, self.n_kv_head, self.head_dim).transpose(1, 2)
+        
+        q = self.q_norm(q) * self.q_gain.to(dtype=q.dtype)[None, :, None, None]
+        k = self.k_norm(q)
 
         k = k.repeat_interleave(self.n_rep, dim=1)
         v = v.repeat_interleave(self.n_rep, dim=1)
@@ -222,13 +235,17 @@ class CausalSelfAttention(nn.Module):
         y = y.transpose(1, 2).contiguous().view(B, T, C)
         return self.resid_drop(self.proj(y))
 
+class ReLUSquared(nn.Module):
+    def forward(self, x):
+        return F.relu(x).square()
+
 class MLP(nn.Module):
     def __init__(self, cfg: GPTConfig):
         super().__init__()
         self.net = nn.Sequential(
-            nn.Linear(cfg.d_model, 4 * cfg.d_model),
-            nn.GELU(),
-            nn.Linear(4 * cfg.d_model, cfg.d_model),
+            nn.Linear(cfg.d_model, 4 * cfg.d_model, bias=False),
+            ReLUSquared(),
+            nn.Linear(4 * cfg.d_model, cfg.d_model, bias=False),
             nn.Dropout(cfg.dropout),
         )
     def forward(self, x): return self.net(x)
@@ -236,8 +253,8 @@ class MLP(nn.Module):
 class Block(nn.Module):
     def __init__(self, cfg: GPTConfig):
         super().__init__()
-        self.ln1 = nn.LayerNorm(cfg.d_model)
-        self.ln2 = nn.LayerNorm(cfg.d_model)
+        self.ln1 = nn.RMSNorm(cfg.d_model)
+        self.ln2 = nn.RMSNorm(cfg.d_model)
         self.attn = CausalSelfAttention(cfg)
         self.mlp  = MLP(cfg)
     def forward(self, x):
