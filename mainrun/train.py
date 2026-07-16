@@ -1,8 +1,3 @@
-from turtle import forward
-
-from numpy import dtype
-
-import utils
 import math, random, time
 from dataclasses import dataclass
 import json
