@@ -229,8 +229,13 @@ class CausalSelfAttention(nn.Module):
             dropout_p=self.dropout if self.training else 0.0,
             is_causal=True
         )
-        y = y.transpose(1, 2).contiguous().view(B, T, C)
-        return self.resid_drop(self.proj(y))
+        
+        # XSA - Exclusive Self Attention mode
+        Vn = torch.nn.functional.normalize(v, dim=-1)
+        Z = y - (y - Vn).sum(dim=-1, keepdim=True) * Vn
+        
+        Z = Z.transpose(1, 2).contiguous().view(B, T, C)
+        return self.resid_drop(self.proj(Z))
 
 class ReLUSquared(nn.Module):
     def forward(self, x):
