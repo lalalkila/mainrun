@@ -187,9 +187,7 @@ class CausalSelfAttention(nn.Module):
         self.k_proj = nn.Linear(cfg.d_model, self.n_kv_head * self.head_dim)
         self.v_proj = nn.Linear(cfg.d_model, self.n_kv_head * self.head_dim)
         self.proj = nn.Linear(cfg.d_model, cfg.d_model)
-        self.attn_drop = nn.Dropout(cfg.dropout)
         self.resid_drop= nn.Dropout(cfg.dropout)
-        self.register_buffer("tril", torch.tril(torch.ones(cfg.block_size, cfg.block_size)))
         
         rope_cos, rope_sin = _build_rope_cache(cfg.block_size, self.head_dim, theta=cfg.rope_theta)
         self.register_buffer("rope_cos", rope_cos, persistent=False)
@@ -222,11 +220,19 @@ class CausalSelfAttention(nn.Module):
         sin = self.rope_sin[:T].to(dtype=q.dtype)
         q, k = apply_rope(q, k, cos, sin)
         
-        att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(self.head_dim))
-        att = att.masked_fill(self.tril[:T, :T] == 0, float("-inf"))
-        att = F.softmax(att, dim=-1)
-        att = self.attn_drop(att)
-        y = att @ v
+        # att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(self.head_dim))
+        # att = att.masked_fill(self.tril[:T, :T] == 0, float("-inf"))
+        # att = F.softmax(att, dim=-1)
+        # att = self.attn_drop(att)
+        # y = att @ v
+        # y = y.transpose(1, 2).contiguous().view(B, T, C)
+        
+        y = F.scaled_dot_product_attention(
+            q, k, v,
+            attn_mask=None,
+            dropout_p=self.dropoutput if self.training else 0.0,
+            is_causal=True
+        )
         y = y.transpose(1, 2).contiguous().view(B, T, C)
         return self.resid_drop(self.proj(y))
 
