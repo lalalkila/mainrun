@@ -179,6 +179,7 @@ class CausalSelfAttention(nn.Module):
         super().__init__()
         assert cfg.d_model % cfg.n_head == 0
         assert cfg.n_head % cfg.n_kv_head == 0
+        self.dropout = cfg.dropout
         self.head_dim = cfg.d_model // cfg.n_head
         self.n_head = cfg.n_head
         self.n_kv_head = cfg.n_kv_head
@@ -230,7 +231,7 @@ class CausalSelfAttention(nn.Module):
         y = F.scaled_dot_product_attention(
             q, k, v,
             attn_mask=None,
-            dropout_p=self.dropoutput if self.training else 0.0,
+            dropout_p=self.dropout if self.training else 0.0,
             is_causal=True
         )
         y = y.transpose(1, 2).contiguous().view(B, T, C)
