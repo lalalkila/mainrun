@@ -213,7 +213,7 @@ class CausalSelfAttention(nn.Module):
         v = self.v_proj(x).view(B, T, self.n_kv_head, self.head_dim).transpose(1, 2)
         
         q = self.q_norm(q) * self.q_gain.to(dtype=q.dtype)[None, :, None, None]
-        k = self.k_norm(q)
+        k = self.k_norm(k)
 
         k = k.repeat_interleave(self.n_rep, dim=1)
         v = v.repeat_interleave(self.n_rep, dim=1)
