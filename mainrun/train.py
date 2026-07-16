@@ -184,7 +184,6 @@ class CausalSelfAttention(nn.Module):
         self.n_head = cfg.n_head
         self.n_kv_head = cfg.n_kv_head
         self.n_rep = self.n_head // self.n_kv_head
-        self.qkv = nn.Linear(cfg.d_model, 3 * cfg.d_model)
         self.q_proj = nn.Linear(cfg.d_model, self.n_head * self.head_dim)
         self.k_proj = nn.Linear(cfg.d_model, self.n_kv_head * self.head_dim)
         self.v_proj = nn.Linear(cfg.d_model, self.n_kv_head * self.head_dim)
@@ -204,9 +203,6 @@ class CausalSelfAttention(nn.Module):
 
     def forward(self, x: torch.Tensor):
         B, T, C = x.size()
-        # qkv = self.qkv(x).view(B, T, 3, self.n_head, self.head_dim).transpose(1, 3)
-        # q, k, v = qkv[..., 0, :, :], qkv[..., 1, :, :], qkv[..., 2, :, :]
-        # q = q * self.q_gain.to(dtype=q.dtype)[None, :, None, None]
         q = self.q_proj(x).view(B, T, self.n_head, self.head_dim).transpose(1, 2)
         k = self.k_proj(x).view(B, T, self.n_kv_head, self.head_dim).transpose(1, 2)
         v = self.v_proj(x).view(B, T, self.n_kv_head, self.head_dim).transpose(1, 2)
