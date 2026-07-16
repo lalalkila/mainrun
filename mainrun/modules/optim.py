@@ -60,7 +60,8 @@ class Muon(torch.optim.Optimizer):
     """
     def __init__(self, model: nn.Module, lr: float = 0.02, weight_decay: float = 0.0,
                  momentum: float = 0.95, nesterov: bool = True, ns_steps: int = 5,
-                 adam_lr: float = 3e-4, betas: tuple[float, float] = (0.9, 0.95), eps: float = 1e-10):
+                 adam_lr: float = 3e-4, betas: tuple[float, float] = (0.9, 0.95), eps: float = 1e-10,
+                 normalize_rows: bool = False, muon_beta2: float = 0.95, muon_eps: float = 1e-8):
         muon_params, adam_params = [], []
         seen = set()
         for name, p in model.named_parameters():
@@ -74,7 +75,8 @@ class Muon(torch.optim.Optimizer):
 
         param_groups = [
             dict(params=muon_params, use_muon=True, lr=lr, momentum=momentum,
-                 nesterov=nesterov, ns_steps=ns_steps, weight_decay=weight_decay),
+                 nesterov=nesterov, ns_steps=ns_steps, weight_decay=weight_decay,
+                 normalize_rows=normalize_rows, muon_beta2=muon_beta2, muon_eps=muon_eps),
             dict(params=adam_params, use_muon=False, lr=adam_lr, betas=betas,
                  eps=eps, weight_decay=weight_decay),
         ]
@@ -95,10 +97,28 @@ class Muon(torch.optim.Optimizer):
                     state = self.state[p]
                     if len(state) == 0:
                         state["momentum_buffer"] = torch.zeros_like(p)
+                        if group["normalize_rows"]:
+                            state["row_second_moment"] = torch.zeros(p.shape[0], device=p.device, dtype=p.dtype)
+                    
                     update = muon_update(p.grad, state["momentum_buffer"], beta=group["momentum"],
                                           ns_steps=group["ns_steps"], nesterov=group["nesterov"])
-                    p.mul_(1 - group["lr"] * group["weight_decay"])
-                    p.add_(update.reshape(p.shape), alpha=-group["lr"])
+                    update = update.reshape(p.shape)
+                    
+                    if group["normalize_rows"]:
+                        # NorMuon Algorithm 1, lines 7-10: EMA of per-row mean
+                        # squared update, row-wise normalize, then rescale so
+                        # the RMS norm matches what Adam would give.
+                        v = state["row_second_moment"]
+                        row_mean_sq = update.reshape(update.shape[0], -1).float().pow(2).mean(dim=-1).to(v.dtype)
+                        v.lerp_(row_mean_sq, 1 - group["muon_beta2"])
+                        denom = v.sqrt().add(group["muon_eps"]).view(-1, *([1] * (update.ndim - 1)))
+                        update = update / denom
+                        scale = 0.2 * (update.numel() ** 0.5) / (update.norm() + 1e-12)
+                        p.mul_(1 - group["lr"] * group["weight_decay"])
+                        p.add_(update, alpha=-group["lr"] * scale.item())
+                    else:
+                        p.mul_(1 - group["lr"] * group["weight_decay"])
+                        p.add_(update, alpha=-group["lr"])
             else:
                 for p in group["params"]:
                     if p.grad is None:
