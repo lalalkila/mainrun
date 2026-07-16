@@ -27,7 +27,8 @@ class Hyperparameters:
     weight_decay: float = 0.1
     evals_per_epoch: int = 3
     
-    qk_gain : float = 3.0
+    qk_gain: float = 3.0
+    final_logit_cap: float = 30.0
     n_kv_heads: int = 4
     rope_theta: float = 10_000.0
     
@@ -151,6 +152,7 @@ class GPTConfig:
     qk_gain: float
     n_kv_head: int
     rope_theta: float
+    final_logit_cap: float | None
 
 # Rotary positional embeddings (RoPE)
 
@@ -221,13 +223,6 @@ class CausalSelfAttention(nn.Module):
         sin = self.rope_sin[:T].to(dtype=q.dtype)
         q, k = apply_rope(q, k, cos, sin)
         
-        # att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(self.head_dim))
-        # att = att.masked_fill(self.tril[:T, :T] == 0, float("-inf"))
-        # att = F.softmax(att, dim=-1)
-        # att = self.attn_drop(att)
-        # y = att @ v
-        # y = y.transpose(1, 2).contiguous().view(B, T, C)
-        
         y = F.scaled_dot_product_attention(
             q, k, v,
             attn_mask=None,
@@ -293,6 +288,11 @@ class GPT(nn.Module):
         for block in self.blocks: x = block(x)
         x = self.ln_f(x)
         logits = self.head(x)
+        
+        if self.cfg.final_logit_cap is not None:
+            cap = self.cfg.final_logit_cap
+            logits = cap * torch.tanh(logits / cap)
+            
         if targets is None:
             loss = None
         else:
@@ -359,7 +359,8 @@ def main():
         dropout    = args.dropout,
         qk_gain    = args.qk_gain,
         n_kv_head  = args.n_kv_heads,
-        rope_theta = args.rope_theta
+        rope_theta = args.rope_theta,
+        final_logit_cap = args.final_logit_cap
     )
     model = GPT(cfg).to(device)
     model_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
