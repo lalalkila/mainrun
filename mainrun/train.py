@@ -21,15 +21,15 @@ class Hyperparameters:
     vocab_size: int = 16_000
     n_layer: int = 6
     n_head: int = 8
-    d_model: int = 512
+    d_model: int = 256
     dropout: float = 0.0
-    lr: float = 7e-3
+    lr: float = 3e-3
     weight_decay: float = 0.1
     evals_per_epoch: int = 3
     
     qk_gain: float = 3.0
     final_logit_cap: float = 30.0
-    n_kv_heads: int = 4
+    n_kv_heads: int = 8 # normal attention
     rope_theta: float = 10_000.0
     
     epochs: int = 7
@@ -83,6 +83,18 @@ def configure_logging(log_file: str):
     return DualLogger(file_handler)
 
 logger = None
+
+def sanitize_heads(d_model: int, n_head: int, n_kv_heads: int) -> tuple[int, int]:
+    """Snap a (n_head, n_kv_heads) pair proposed by a sweep to the nearest combo
+    that satisfies the model's hard constraints: d_model % n_head == 0,
+    head_dim = d_model // n_head must be even (RoPE), and n_head % n_kv_heads == 0."""
+    valid = [h for h in range(1, d_model + 1)
+             if d_model % h == 0 and (d_model // h) % 2 == 0]
+    if n_head not in valid:
+        n_head = min(valid, key=lambda h: abs(h - n_head))
+    n_kv_heads = max((k for k in range(1, n_head + 1) if n_head % k == 0 and k <= n_kv_heads),
+                     default=1)
+    return n_head, n_kv_heads
 
 def get_titles(num_titles: int, seed: int, val_frac: float) -> str:
     ds = load_dataset("julien040/hacker-news-posts", split="train", cache_dir="./data").shuffle(seed=seed)
@@ -190,6 +202,7 @@ class CausalSelfAttention(nn.Module):
         self.k_proj = nn.Linear(cfg.d_model, self.n_kv_head * self.head_dim)
         self.v_proj = nn.Linear(cfg.d_model, self.n_kv_head * self.head_dim)
         self.proj = nn.Linear(cfg.d_model, cfg.d_model)
+        self.gate = nn.Linear(cfg.d_model, self.n_head * self.head_dim, bias=False)
         self.resid_drop= nn.Dropout(cfg.dropout)
         
         rope_cos, rope_sin = _build_rope_cache(cfg.block_size, self.head_dim, theta=cfg.rope_theta)
@@ -235,6 +248,7 @@ class CausalSelfAttention(nn.Module):
         Z = y - (y - Vn).sum(dim=-1, keepdim=True) * Vn
         
         Z = Z.transpose(1, 2).contiguous().view(B, T, C)
+        Z = Z * torch.sigmoid(self.gate(x))   # head-specific elementwise gate (C = n_head*head_dim)
         return self.resid_drop(self.proj(Z))
 
 class ReLUSquared(nn.Module):
@@ -313,6 +327,11 @@ def main():
         config=vars(args)
     )
     
+    # sweep may propose n_head/n_kv_heads/d_model independently; snap to a valid
+    # combo at the wandb-config boundary so no trial crashes on the model asserts
+    nh, nkv = sanitize_heads(run.config["d_model"], run.config["n_head"], run.config["n_kv_heads"])
+    run.config.update({"n_head": nh, "n_kv_heads": nkv}, allow_val_change=True)
+
     for k, v in run.config.items():
         if hasattr(args, k):
             setattr(args, k, v)

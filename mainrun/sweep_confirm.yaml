@@ -11,6 +11,9 @@ early_terminate:
   min_iter: 1
   eta: 2
 
+# Confirm sweep: run at the real epochs=7 budget so the winner transfers directly
+# to the final eval. Narrow these `values` lists to the explore sweep's top region
+# once mainrun/sweep.yaml has results -- placeholders below just mirror explore.
 parameters:
   lr:
     min: 1e-4
