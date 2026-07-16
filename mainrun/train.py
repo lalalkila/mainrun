@@ -30,6 +30,7 @@ class Hyperparameters:
     
     qk_gain : float = 3.0
     n_kv_heads: int = 4
+    rope_theta: float = 10_000.0
     
     epochs: int = 7
     seed: int = 1337
@@ -150,6 +151,29 @@ class GPTConfig:
     dropout: float
     qk_gain: float
     n_kv_head: int
+    rope_theta: float
+
+# Rotary positional embeddings (RoPE)
+
+def _build_rope_cache(seq_len: int, head_dim: int, theta: float) -> tuple[torch.Tensor, torch.Tensor]:
+    assert head_dim % 2 == 0
+    inv_freq = 1.0 / (theta ** torch.arange(0, head_dim, 2, dtype=torch.float32) / head_dim)
+    t = torch.arange(seq_len, dtype=torch.float32)
+    freqs = torch.outer(t, inv_freq)
+    emb = torch.cat((freqs, freqs), dim=-1)
+    return emb.cos(), emb.sin()
+
+def _rotate_half(x: torch.Tensor) -> torch.Tensor:
+    x1, x2 = x.chunk(2, dim=-1)
+    return torch.cat((-x2, x1), dim=-1)
+
+def apply_rope(q: torch.Tensor, k: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    cos = cos[None, None, :, :]
+    sin = sin[None, None, :, :]
+    q_rot = (q * cos) + (_rotate_half(q) * sin)
+    k_rot = (k * cos) + (_rotate_half(k) * sin)
+    return q_rot, k_rot
+
 
 class CausalSelfAttention(nn.Module):
     def __init__(self, cfg: GPTConfig):
@@ -169,6 +193,10 @@ class CausalSelfAttention(nn.Module):
         self.resid_drop= nn.Dropout(cfg.dropout)
         self.register_buffer("tril", torch.tril(torch.ones(cfg.block_size, cfg.block_size)))
         
+        rope_cos, rope_sin = _build_rope_cache(cfg.block_size, self.head_dim, theta=cfg.rope_theta)
+        self.register_buffer("rope_cos", rope_cos, persistent=False)
+        self.register_buffer("rope_sin", rope_sin, persistent=False)
+        
         # QK-gain param
         self.q_gain = nn.Parameter(
             torch.full((self.n_head,), cfg.qk_gain, dtype=torch.float32)
@@ -185,6 +213,10 @@ class CausalSelfAttention(nn.Module):
 
         k = k.repeat_interleave(self.n_rep, dim=1)
         v = v.repeat_interleave(self.n_rep, dim=1)
+        
+        cos = self.rope_cos[:T].to(dtype=q.dtype)
+        sin = self.rope_sin[:T].to(dtype=q.dtype)
+        q, k = apply_rope(q, k, cos, sin)
         
         att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(self.head_dim))
         att = att.masked_fill(self.tril[:T, :T] == 0, float("-inf"))
@@ -311,7 +343,8 @@ def main():
         d_model    = args.d_model,
         dropout    = args.dropout,
         qk_gain    = args.qk_gain,
-        n_kv_head  = args.n_kv_heads
+        n_kv_head  = args.n_kv_heads,
+        rope_theta = args.rope_theta
     )
     model = GPT(cfg).to(device)
     model_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
