@@ -17,7 +17,7 @@ from modules import optim, token
 @dataclass
 class Hyperparameters:
     block_size: int = 64
-    batch_size: int = 64
+    batch_size: int = 128
     vocab_size: int = 16_000
     n_layer: int = 6
     n_head: int = 8
