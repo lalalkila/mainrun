@@ -1,0 +1,27 @@
+program: train.py
+project: mainrun
+entity: duylam-lee-the-university-of-sydney
+method: bayes
+metric:
+  name: val_loss
+  goal: minimize
+
+
+parameters:
+  lr:
+    min: 1e-4
+    max: 1e-2
+    distribution: log_uniform_values
+  weight_decay:
+    min: 0.0
+    max: 0.2
+    distribution: uniform
+  dropout:
+    min: 0.0
+    max: 0.2
+    distribution: uniform
+
+command:
+  - ${env}
+  - python3
+  - train.py
