@@ -22,13 +22,14 @@ class Hyperparameters:
     n_layer: int = 6
     n_head: int = 8
     d_model: int = 512 # 256
-    dropout: float = 0.15
-    lr: float = 3e-3
-    weight_decay: float = 0.1
+    dropout: float = 0.09
+    lr: float = 5e-3
+    weight_decay: float = 0.15
+    warmup_frac: float = 0.05  # linear LR warmup as fraction of max_steps
     evals_per_epoch: int = 3
     
     qk_gain: float = 3.0
-    final_logit_cap: float = 30.0
+    final_logit_cap: float = 15.0
     n_kv_heads: int = 8 # normal attention
     rope_theta: float = 10_000.0
     
@@ -391,7 +392,12 @@ def main():
     logger.log("model_info", parameters_count=model_params)
     
     opt = optim.Muon(model, lr=args.lr, weight_decay=args.weight_decay)
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=max_steps)
+    warmup_steps = max(1, round(args.warmup_frac * max_steps))
+    warmup = torch.optim.lr_scheduler.LinearLR(
+        opt, start_factor=0.01, end_factor=1.0, total_iters=warmup_steps)
+    cosine = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=max_steps - warmup_steps)
+    scheduler = torch.optim.lr_scheduler.SequentialLR(
+        opt, [warmup, cosine], milestones=[warmup_steps])
 
     def evaluate():
         model.eval()

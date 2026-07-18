@@ -41,6 +41,18 @@ def muon_update(grad: torch.Tensor, momentum: torch.Tensor, beta: float = 0.95,
     return update
 
 
+def apply_weight_decay(p: torch.Tensor, update: torch.Tensor, lr: float, wd: float, cautious: bool) -> None:
+    """Decoupled weight decay, optionally gated cautious (arXiv:2510.12402):
+    decay only where sign(p) == sign(update), since elsewhere the update is
+    already pulling p toward zero and decay would be redundant."""
+    if wd == 0:
+        return
+    if cautious:
+        p.sub_(p * ((p * update) > 0), alpha=lr * wd)
+    else:
+        p.mul_(1 - lr * wd)
+
+
 def adam_update(grad: torch.Tensor, buf1: torch.Tensor, buf2: torch.Tensor,
                  step: int, betas: tuple[float, float], eps: float) -> torch.Tensor:
     buf1.lerp_(grad, 1 - betas[0])
@@ -61,7 +73,8 @@ class Muon(torch.optim.Optimizer):
     def __init__(self, model: nn.Module, lr: float = 0.02, weight_decay: float = 0.0,
                  momentum: float = 0.95, nesterov: bool = True, ns_steps: int = 5,
                  adam_lr: float = 3e-4, betas: tuple[float, float] = (0.9, 0.95), eps: float = 1e-10,
-                 normalize_rows: bool = False, muon_beta2: float = 0.95, muon_eps: float = 1e-8):
+                 normalize_rows: bool = False, muon_beta2: float = 0.95, muon_eps: float = 1e-8,
+                 cautious_wd: bool = True):
         muon_params, adam_params = [], []
         seen = set()
         for name, p in model.named_parameters():
@@ -76,9 +89,10 @@ class Muon(torch.optim.Optimizer):
         param_groups = [
             dict(params=muon_params, use_muon=True, lr=lr, momentum=momentum,
                  nesterov=nesterov, ns_steps=ns_steps, weight_decay=weight_decay,
-                 normalize_rows=normalize_rows, muon_beta2=muon_beta2, muon_eps=muon_eps),
+                 normalize_rows=normalize_rows, muon_beta2=muon_beta2, muon_eps=muon_eps,
+                 cautious_wd=cautious_wd),
             dict(params=adam_params, use_muon=False, lr=adam_lr, betas=betas,
-                 eps=eps, weight_decay=weight_decay),
+                 eps=eps, weight_decay=weight_decay, cautious_wd=cautious_wd),
         ]
         super().__init__(param_groups, dict())
 
@@ -114,10 +128,10 @@ class Muon(torch.optim.Optimizer):
                         denom = v.sqrt().add(group["muon_eps"]).view(-1, *([1] * (update.ndim - 1)))
                         update = update / denom
                         scale = 0.2 * (update.numel() ** 0.5) / (update.norm() + 1e-12)
-                        p.mul_(1 - group["lr"] * group["weight_decay"])
+                        apply_weight_decay(p, update, group["lr"], group["weight_decay"], group["cautious_wd"])
                         p.add_(update, alpha=-group["lr"] * scale.item())
                     else:
-                        p.mul_(1 - group["lr"] * group["weight_decay"])
+                        apply_weight_decay(p, update, group["lr"], group["weight_decay"], group["cautious_wd"])
                         p.add_(update, alpha=-group["lr"])
             else:
                 for p in group["params"]:
@@ -131,7 +145,7 @@ class Muon(torch.optim.Optimizer):
                     state["step"] += 1
                     update = adam_update(p.grad, state["exp_avg"], state["exp_avg_sq"],
                                           state["step"], group["betas"], group["eps"])
-                    p.mul_(1 - group["lr"] * group["weight_decay"])
+                    apply_weight_decay(p, update, group["lr"], group["weight_decay"], group["cautious_wd"])
                     p.add_(update, alpha=-group["lr"])
 
         return loss
