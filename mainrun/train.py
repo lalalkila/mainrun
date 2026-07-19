@@ -33,7 +33,8 @@ class Hyperparameters:
     n_kv_heads: int = 8 # normal attention
     rope_theta: float = 10_000.0
     value_residual: bool = True
-    
+    unet_mixing: bool = True
+
     epochs: int = 7
     seed: int = 1337
     num_titles: int = 100_000
@@ -168,6 +169,7 @@ class GPTConfig:
     rope_theta: float
     final_logit_cap: float | None
     value_residual: bool
+    unet_mixing: bool
 
 # Rotary positional embeddings (RoPE)
 
@@ -303,6 +305,14 @@ class GPT(nn.Module):
         self.ln_f      = nn.LayerNorm(cfg.d_model)
         self.head      = nn.Linear(cfg.d_model, cfg.vocab_size, bias=False)
 
+        self.unet_mixing = cfg.unet_mixing
+        if self.unet_mixing:
+            half = cfg.n_layer // 2
+            n_deep = cfg.n_layer - half
+            self.unet_lam = nn.ParameterList(
+                nn.Parameter(torch.tensor([1.0, 0.0, 0.0])) for _ in range(n_deep)
+            )
+
         self.apply(self._init_weights)
         self.head.weight = self.token_emb.weight
 
@@ -319,8 +329,20 @@ class GPT(nn.Module):
         pos = self.pos_emb[:, :T, :]
         x = self.drop(tok + pos)
         v1 = None
-        for block in self.blocks:
-            x, v1 = block(x, v1)
+        if self.unet_mixing:
+            half = self.cfg.n_layer // 2
+            xs = [x]                                  # xs[0] = token embedding
+            for i, block in enumerate(self.blocks):
+                n = i + 1
+                if n > half:
+                    lam = self.unet_lam[i - half]
+                    k = self.cfg.n_layer + 1 - n       # symmetric shallow partner
+                    x = lam[0] * x + lam[1] * xs[0] + lam[2] * xs[k]
+                x, v1 = block(x, v1)
+                xs.append(x)
+        else:
+            for block in self.blocks:
+                x, v1 = block(x, v1)
         x = self.ln_f(x)
         logits = self.head(x)
         
@@ -401,7 +423,8 @@ def main():
         n_kv_head  = args.n_kv_heads,
         rope_theta = args.rope_theta,
         final_logit_cap = args.final_logit_cap,
-        value_residual = args.value_residual
+        value_residual = args.value_residual,
+        unet_mixing = args.unet_mixing
     )
     model = GPT(cfg).to(device)
     model_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
