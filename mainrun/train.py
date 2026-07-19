@@ -32,6 +32,7 @@ class Hyperparameters:
     final_logit_cap: float = 15.0
     n_kv_heads: int = 8 # normal attention
     rope_theta: float = 10_000.0
+    value_residual: bool = True
     
     epochs: int = 7
     seed: int = 1337
@@ -166,6 +167,7 @@ class GPTConfig:
     n_kv_head: int
     rope_theta: float
     final_logit_cap: float | None
+    value_residual: bool
 
 # Rotary positional embeddings (RoPE)
 
@@ -205,7 +207,11 @@ class CausalSelfAttention(nn.Module):
         self.proj = nn.Linear(cfg.d_model, cfg.d_model)
         self.gate = nn.Linear(cfg.d_model, self.n_head * self.head_dim, bias=False)
         self.resid_drop= nn.Dropout(cfg.dropout)
-        
+
+        self.value_residual = cfg.value_residual
+        if self.value_residual:
+            self.lam = nn.Parameter(torch.tensor(0.5))
+
         rope_cos, rope_sin = _build_rope_cache(cfg.block_size, self.head_dim, theta=cfg.rope_theta)
         self.register_buffer("rope_cos", rope_cos, persistent=False)
         self.register_buffer("rope_sin", rope_sin, persistent=False)
@@ -221,12 +227,18 @@ class CausalSelfAttention(nn.Module):
         self.q_norm = nn.RMSNorm(self.head_dim, elementwise_affine=False)
         self.k_norm = nn.RMSNorm(self.head_dim, elementwise_affine=False)
 
-    def forward(self, x: torch.Tensor):
+    def forward(self, x: torch.Tensor, v1: torch.Tensor | None = None):
         B, T, C = x.size()
         q = self.q_proj(x).view(B, T, self.n_head, self.head_dim).transpose(1, 2)
         k = self.k_proj(x).view(B, T, self.n_kv_head, self.head_dim).transpose(1, 2)
         v = self.v_proj(x).view(B, T, self.n_kv_head, self.head_dim).transpose(1, 2)
-        
+
+        if self.value_residual:
+            if v1 is None:
+                v1 = v                       # layer 1 supplies the residual value
+            else:
+                v = (1 - self.lam) * v + self.lam * v1
+
         q = self.q_norm(q) * self.q_gain.to(dtype=q.dtype)[None, :, None, None]
         k = self.k_norm(k)
 
@@ -250,7 +262,7 @@ class CausalSelfAttention(nn.Module):
         
         Z = Z.transpose(1, 2).contiguous().view(B, T, C)
         Z = Z * torch.sigmoid(self.gate(x))   # head-specific elementwise gate (C = n_head*head_dim)
-        return self.resid_drop(self.proj(Z))
+        return self.resid_drop(self.proj(Z)), v1
 
 class ReLUSquared(nn.Module):
     def forward(self, x):
@@ -274,10 +286,11 @@ class Block(nn.Module):
         self.ln2 = nn.RMSNorm(cfg.d_model)
         self.attn = CausalSelfAttention(cfg)
         self.mlp  = MLP(cfg)
-    def forward(self, x):
-        x = x + self.attn(self.ln1(x))
+    def forward(self, x, v1=None):
+        attn_out, v1 = self.attn(self.ln1(x), v1)
+        x = x + attn_out
         x = x + self.mlp(self.ln2(x))
-        return x
+        return x, v1
 
 class GPT(nn.Module):
     def __init__(self, cfg: GPTConfig):
@@ -305,7 +318,9 @@ class GPT(nn.Module):
         tok = self.token_emb(idx)
         pos = self.pos_emb[:, :T, :]
         x = self.drop(tok + pos)
-        for block in self.blocks: x = block(x)
+        v1 = None
+        for block in self.blocks:
+            x, v1 = block(x, v1)
         x = self.ln_f(x)
         logits = self.head(x)
         
@@ -385,7 +400,8 @@ def main():
         qk_gain    = args.qk_gain,
         n_kv_head  = args.n_kv_heads,
         rope_theta = args.rope_theta,
-        final_logit_cap = args.final_logit_cap
+        final_logit_cap = args.final_logit_cap,
+        value_residual = args.value_residual
     )
     model = GPT(cfg).to(device)
     model_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
