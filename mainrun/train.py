@@ -23,9 +23,9 @@ class Hyperparameters:
     n_head: int = 8
     d_model: int = 512 # 256
     dropout: float = 0.09
-    lr: float = 5e-3
-    weight_decay: float = 0.15
-    warmup_frac: float = 0.05  # linear LR warmup as fraction of max_steps
+    lr: float = 8e-3
+    weight_decay: float = 0.05
+    warmup_frac: float = 0.12  # linear LR warmup as fraction of max_steps
     ns_steps: int = 5  # Newton-Schulz / Polar Express orthogonalization steps
     safety_factor: float = 1.01  # Polar Express norm-cushion (arXiv:2505.16932)
     evals_per_epoch: int = 3
