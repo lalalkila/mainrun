@@ -291,14 +291,6 @@ class GPT(nn.Module):
         self.ln_f      = nn.LayerNorm(cfg.d_model)
         self.head      = nn.Linear(cfg.d_model, cfg.vocab_size, bias=False)
 
-        self.unet_mixing = cfg.unet_mixing
-        if self.unet_mixing:
-            half = cfg.n_layer // 2
-            n_deep = cfg.n_layer - half
-            self.unet_lam = nn.ParameterList(
-                nn.Parameter(torch.tensor([1.0, 0.0, 0.0])) for _ in range(n_deep)
-            )
-
         self.apply(self._init_weights)
         self.head.weight = self.token_emb.weight
 
@@ -314,7 +306,8 @@ class GPT(nn.Module):
         tok = self.token_emb(idx)
         pos = self.pos_emb[:, :T, :]
         x = self.drop(tok + pos)
-        for block in self.blocks: x = block(x)
+        for block in self.blocks:
+            x = block(x)
         x = self.ln_f(x)
         logits = self.head(x)
         
