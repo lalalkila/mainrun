@@ -11,16 +11,38 @@ import torch
 import torch.nn as nn
 
 
-def zeropower_via_newtonschulz5(G: torch.Tensor, steps: int) -> torch.Tensor:
-    """Quintic Newton-Schulz iteration approximating the zeroth power (orthogonalization) of G."""
+# Polar Express per-step quintic coeffs (arXiv:2505.16932), replacing Muon's
+# single fixed Newton-Schulz triple with the minimax-optimal one per iteration.
+# Values are optimal_composition(l=1e-3, num_iters=10, safety_factor_eps=1e-2,
+# cushion=0.02) from the reference impl (github.com/NoahAmsel/PolarExpress) -
+# ponytail: precomputed constants, not solved at runtime (avoids a scipy/Remez dep).
+POLAR_EXPRESS_COEFFS = [
+    (8.237312490495558, -23.157747414558205, 16.68056841144592),
+    (4.082441999064834, -2.893047735332586, 0.5252849256975647),
+    (3.926347992254655, -2.85474680347653, 0.531802242289499),
+    (3.2982187133085143, -2.424541981026706, 0.48632008358844075),
+    (2.297036943455258, -1.6366255812590327, 0.4002628455953635),
+    (1.8763805351440446, -1.234789657772233, 0.3589188750166889),
+    (1.8564423485588517, -1.2132449880877845, 0.35680034877976435),
+    (1.8564369760985797, -1.2132402974529466, 0.3568009133792987),
+    (1.8564311671856515, -1.2132289085779973, 0.35679533116132595),
+    (1.8749954775667725, -1.2499909551553612, 0.37499547758858837),  # converged fixed point
+]
+
+
+def zeropower_via_newtonschulz5(G: torch.Tensor, steps: int, safety_factor: float = 1.01) -> torch.Tensor:
+    """Polar Express orthogonalization: per-step optimal quintic coeffs (arXiv:2505.16932)
+    instead of Muon's single fixed Newton-Schulz triple. Steps beyond the precomputed
+    list repeat the converged last triple."""
     assert G.ndim >= 2
-    a, b, c = (3.4445, -4.7750, 2.0315)
     X = G.bfloat16()
     if G.size(-2) > G.size(-1):
         X = X.mT
 
-    X = X / (X.norm(dim=(-2, -1), keepdim=True) + 1e-7)
-    for _ in range(steps):
+    X = X / (X.norm(dim=(-2, -1), keepdim=True) * safety_factor + 1e-7)
+    coeffs = POLAR_EXPRESS_COEFFS[:steps]
+    coeffs += [POLAR_EXPRESS_COEFFS[-1]] * (steps - len(coeffs))
+    for a, b, c in coeffs:
         A = X @ X.mT
         B = b * A + c * A @ A
         X = a * X + B @ X
@@ -31,12 +53,12 @@ def zeropower_via_newtonschulz5(G: torch.Tensor, steps: int) -> torch.Tensor:
 
 
 def muon_update(grad: torch.Tensor, momentum: torch.Tensor, beta: float = 0.95,
-                 ns_steps: int = 5, nesterov: bool = True) -> torch.Tensor:
+                 ns_steps: int = 5, nesterov: bool = True, safety_factor: float = 1.01) -> torch.Tensor:
     momentum.lerp_(grad, 1 - beta)
     update = grad.lerp_(momentum, beta) if nesterov else momentum
     if update.ndim == 4:
         update = update.view(len(update), -1)
-    update = zeropower_via_newtonschulz5(update, steps=ns_steps)
+    update = zeropower_via_newtonschulz5(update, steps=ns_steps, safety_factor=safety_factor)
     update *= max(1, grad.size(-2) / grad.size(-1)) ** 0.5
     return update
 
@@ -72,6 +94,7 @@ class Muon(torch.optim.Optimizer):
     """
     def __init__(self, model: nn.Module, lr: float = 0.02, weight_decay: float = 0.0,
                  momentum: float = 0.95, nesterov: bool = True, ns_steps: int = 5,
+                 safety_factor: float = 1.01,
                  adam_lr: float = 3e-4, betas: tuple[float, float] = (0.9, 0.95), eps: float = 1e-10,
                  normalize_rows: bool = False, muon_beta2: float = 0.95, muon_eps: float = 1e-8,
                  cautious_wd: bool = True):
@@ -88,7 +111,7 @@ class Muon(torch.optim.Optimizer):
 
         param_groups = [
             dict(params=muon_params, use_muon=True, lr=lr, momentum=momentum,
-                 nesterov=nesterov, ns_steps=ns_steps, weight_decay=weight_decay,
+                 nesterov=nesterov, ns_steps=ns_steps, safety_factor=safety_factor, weight_decay=weight_decay,
                  normalize_rows=normalize_rows, muon_beta2=muon_beta2, muon_eps=muon_eps,
                  cautious_wd=cautious_wd),
             dict(params=adam_params, use_muon=False, lr=adam_lr, betas=betas,
@@ -115,7 +138,8 @@ class Muon(torch.optim.Optimizer):
                             state["row_second_moment"] = torch.zeros(p.shape[0], device=p.device, dtype=p.dtype)
                     
                     update = muon_update(p.grad, state["momentum_buffer"], beta=group["momentum"],
-                                          ns_steps=group["ns_steps"], nesterov=group["nesterov"])
+                                          ns_steps=group["ns_steps"], nesterov=group["nesterov"],
+                                          safety_factor=group["safety_factor"])
                     update = update.reshape(p.shape)
                     
                     if group["normalize_rows"]:
