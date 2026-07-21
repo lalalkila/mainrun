@@ -14,11 +14,11 @@ parameters:
     distribution: log_uniform_values
   weight_decay:
     min: 0.0
-    max: 0.2
+    max: 0.4
     distribution: uniform
   dropout:
     min: 0.0
-    max: 0.2
+    max: 0.4
     distribution: uniform
 
 command:
