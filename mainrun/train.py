@@ -34,9 +34,7 @@ class Hyperparameters:
     final_logit_cap: float = 15.0
     n_kv_heads: int = 8 # normal attention
     rope_theta: float = 10_000.0
-    value_residual: bool = True
-    unet_mixing: bool = True
-
+    
     epochs: int = 7
     seed: int = 1337
     num_titles: int = 100_000
@@ -170,8 +168,6 @@ class GPTConfig:
     n_kv_head: int
     rope_theta: float
     final_logit_cap: float | None
-    value_residual: bool
-    unet_mixing: bool
 
 # Rotary positional embeddings (RoPE)
 
@@ -211,11 +207,7 @@ class CausalSelfAttention(nn.Module):
         self.proj = nn.Linear(cfg.d_model, cfg.d_model)
         self.gate = nn.Linear(cfg.d_model, self.n_head * self.head_dim, bias=False)
         self.resid_drop= nn.Dropout(cfg.dropout)
-
-        self.value_residual = cfg.value_residual
-        if self.value_residual:
-            self.lam = nn.Parameter(torch.tensor(0.5))
-
+        
         rope_cos, rope_sin = _build_rope_cache(cfg.block_size, self.head_dim, theta=cfg.rope_theta)
         self.register_buffer("rope_cos", rope_cos, persistent=False)
         self.register_buffer("rope_sin", rope_sin, persistent=False)
@@ -231,18 +223,12 @@ class CausalSelfAttention(nn.Module):
         self.q_norm = nn.RMSNorm(self.head_dim, elementwise_affine=False)
         self.k_norm = nn.RMSNorm(self.head_dim, elementwise_affine=False)
 
-    def forward(self, x: torch.Tensor, v1: torch.Tensor | None = None):
+    def forward(self, x: torch.Tensor):
         B, T, C = x.size()
         q = self.q_proj(x).view(B, T, self.n_head, self.head_dim).transpose(1, 2)
         k = self.k_proj(x).view(B, T, self.n_kv_head, self.head_dim).transpose(1, 2)
         v = self.v_proj(x).view(B, T, self.n_kv_head, self.head_dim).transpose(1, 2)
-
-        if self.value_residual:
-            if v1 is None:
-                v1 = v                       # layer 1 supplies the residual value
-            else:
-                v = (1 - self.lam) * v + self.lam * v1
-
+        
         q = self.q_norm(q) * self.q_gain.to(dtype=q.dtype)[None, :, None, None]
         k = self.k_norm(k)
 
@@ -266,7 +252,7 @@ class CausalSelfAttention(nn.Module):
         
         Z = Z.transpose(1, 2).contiguous().view(B, T, C)
         Z = Z * torch.sigmoid(self.gate(x))   # head-specific elementwise gate (C = n_head*head_dim)
-        return self.resid_drop(self.proj(Z)), v1
+        return self.resid_drop(self.proj(Z))
 
 class ReLUSquared(nn.Module):
     def forward(self, x):
@@ -290,11 +276,10 @@ class Block(nn.Module):
         self.ln2 = nn.RMSNorm(cfg.d_model)
         self.attn = CausalSelfAttention(cfg)
         self.mlp  = MLP(cfg)
-    def forward(self, x, v1=None):
-        attn_out, v1 = self.attn(self.ln1(x), v1)
-        x = x + attn_out
+    def forward(self, x):
+        x = x + self.attn(self.ln1(x))
         x = x + self.mlp(self.ln2(x))
-        return x, v1
+        return x
 
 class GPT(nn.Module):
     def __init__(self, cfg: GPTConfig):
@@ -327,22 +312,9 @@ class GPT(nn.Module):
     def forward(self, idx: torch.Tensor, targets: torch.Tensor | None = None):
         B, T = idx.size()
         tok = self.token_emb(idx)
-        x = self.drop(tok)
-        v1 = None
-        if self.unet_mixing:
-            half = self.cfg.n_layer // 2
-            xs = [x]                                  # xs[0] = token embedding
-            for i, block in enumerate(self.blocks):
-                n = i + 1
-                if n > half:
-                    lam = self.unet_lam[i - half]
-                    k = self.cfg.n_layer + 1 - n       # symmetric shallow partner
-                    x = lam[0] * x + lam[1] * xs[0] + lam[2] * xs[k]
-                x, v1 = block(x, v1)
-                xs.append(x)
-        else:
-            for block in self.blocks:
-                x, v1 = block(x, v1)
+        pos = self.pos_emb[:, :T, :]
+        x = self.drop(tok + pos)
+        for block in self.blocks: x = block(x)
         x = self.ln_f(x)
         logits = self.head(x)
         
@@ -422,9 +394,7 @@ def main():
         qk_gain    = args.qk_gain,
         n_kv_head  = args.n_kv_heads,
         rope_theta = args.rope_theta,
-        final_logit_cap = args.final_logit_cap,
-        value_residual = args.value_residual,
-        unet_mixing = args.unet_mixing
+        final_logit_cap = args.final_logit_cap
     )
     model = GPT(cfg).to(device)
     model_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
