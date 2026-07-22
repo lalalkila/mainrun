@@ -1,9 +1,13 @@
+import utils
 import math, random, time
 from dataclasses import dataclass
 import json
 from pathlib import Path
 
-import wandb
+try:
+    import wandb
+except ImportError:
+    wandb = None
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
@@ -328,16 +332,20 @@ def main():
         entity="duylam-lee-the-university-of-sydney",
         project="mainrun",
         config=vars(args)
-    )
-    
-    # sweep may propose n_head/n_kv_heads/d_model independently; snap to a valid
-    # combo at the wandb-config boundary so no trial crashes on the model asserts
-    nh, nkv = sanitize_heads(run.config["d_model"], run.config["n_head"], run.config["n_kv_heads"])
-    run.config.update({"n_head": nh, "n_kv_heads": nkv}, allow_val_change=True)
+    ) if wandb is not None else None
 
-    for k, v in run.config.items():
-        if hasattr(args, k):
-            setattr(args, k, v)
+    # sweep may propose n_head/n_kv_heads/d_model independently; snap to a valid
+    # combo at the wandb-config boundary so no trial crashes on the model asserts.
+    # No wandb -> no sweep -> read/write straight from args instead.
+    cfg_src = run.config if run is not None else vars(args)
+    nh, nkv = sanitize_heads(cfg_src["d_model"], cfg_src["n_head"], cfg_src["n_kv_heads"])
+    if run is not None:
+        run.config.update({"n_head": nh, "n_kv_heads": nkv}, allow_val_change=True)
+        for k, v in run.config.items():
+            if hasattr(args, k):
+                setattr(args, k, v)
+    else:
+        args.n_head, args.n_kv_heads = nh, nkv
     
     torch.manual_seed(args.seed)
     random.seed(args.seed)
@@ -437,9 +445,10 @@ def main():
                     loss=loss.item(),
                     elapsed_time=elapsed,
                     prnt=False)
-            run.log({
-                "loss" : loss.item()
-            })
+            if run is not None:
+                run.log({
+                    "loss" : loss.item()
+                })
 
             if step == 1 or step % eval_interval == 0 or step == max_steps:
                 val_loss = evaluate()
@@ -448,9 +457,10 @@ def main():
                         max_steps=max_steps,
                         loss=val_loss,
                         elapsed_time=elapsed)
-                run.log({
-                    "val_loss" : val_loss
-                })
+                if run is not None:
+                    run.log({
+                        "val_loss" : val_loss
+                    })
 
 if __name__ == "__main__":
     try:
