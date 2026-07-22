@@ -12,7 +12,7 @@ tasks:
       - python3 download_dataset.py
 
   train:
-    deps: [download] #[checkpoint, download]
+    deps: [checkpoint, download]
     dir: mainrun
     cmds:
       - python3 train.py

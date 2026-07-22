@@ -1,5 +1,5 @@
 import utils
-import math, random, time
+import random, time
 from dataclasses import dataclass
 import json
 from pathlib import Path
@@ -25,21 +25,22 @@ class Hyperparameters:
     vocab_size: int = 16_000
     n_layer: int = 6
     n_head: int = 8
-    d_model: int = 512 # 256
+    d_model: int = 512
     dropout: float = 0.09
     lr: float = 8e-3
     weight_decay: float = 0.05
     warmup_frac: float = 0.12  # linear LR warmup as fraction of max_steps
+    warmup_start_factor: float = 0.01  # warmup ramps from this fraction of lr up to 1.0
+    grad_clip: float = 1.0  # max grad norm, torch.nn.utils.clip_grad_norm_
     ns_steps: int = 5  # Newton-Schulz / Polar Express orthogonalization steps
     safety_factor: float = 1.01  # Polar Express norm-cushion (arXiv:2505.16932)
     normalize_rows: bool = True  # NorMuon row-wise second-moment normalization
     evals_per_epoch: int = 3
-    
-    qk_gain: float = 3.0
-    final_logit_cap: float = 15.0
-    n_kv_heads: int = 8 # normal attention
+    qk_gain: float = 3.0  # QK-norm per-head gain init
+    final_logit_cap: float = 15.0  # logit soft-cap, Gemma 2 style
+    n_kv_heads: int = 8  # GQA kv-head count; == n_head here -> full multi-head attention
     rope_theta: float = 1000.0
-    
+
     epochs: int = 7
     seed: int = 1337
     num_titles: int = 100_000
@@ -48,9 +49,9 @@ class Hyperparameters:
 
 def configure_logging(log_file: str):
     Path(log_file).parent.mkdir(parents=True, exist_ok=True)
-    
+
     file_handler = open(log_file, 'w')
-    
+
     structlog.configure(
         processors=[
             structlog.stdlib.filter_by_level,
@@ -67,17 +68,17 @@ def configure_logging(log_file: str):
         logger_factory=structlog.stdlib.LoggerFactory(),
         cache_logger_on_first_use=True,
     )
-    
+
     class DualLogger:
         def __init__(self, file_handler):
             self.file_handler = file_handler
             self.logger = structlog.get_logger()
-            
+
         def log(self, event, **kwargs):
             log_entry = json.dumps({"event": event, "timestamp": time.time(), **kwargs})
             self.file_handler.write(log_entry + "\n")
             self.file_handler.flush()
-            
+
             if kwargs.get("prnt", True):
                 if "step" in kwargs and "max_steps" in kwargs:
                     tqdm.write(f"[{kwargs.get('step'):>5}/{kwargs.get('max_steps')}] {event}: loss={kwargs.get('loss', 'N/A'):.6f} time={kwargs.get('elapsed_time', 0):.2f}s")
@@ -87,7 +88,7 @@ def configure_logging(log_file: str):
                         tqdm.write(f"{event}: {', '.join(parts)}")
                     else:
                         tqdm.write(event)
-    
+
     return DualLogger(file_handler)
 
 logger = None
@@ -133,8 +134,8 @@ def train_tokenizer(
     unk_token: str = "<unk>",
     pad_token: str = "<pad>",
     eos_token: str = "<eos>",
-    caps_token: str = "<cps>",
-    start_token: str = "<ttl>",
+    caps_token: str = "<caps>",
+    start_token: str = "<strt>",
 ) -> Tokenizer:
     tokenizer = Tokenizer(models.BPE(unk_token=unk_token))
     tokenizer.pre_tokenizer = pre_tokenizers.ByteLevel()
@@ -210,21 +211,20 @@ class CausalSelfAttention(nn.Module):
         self.k_proj = nn.Linear(cfg.d_model, self.n_kv_head * self.head_dim)
         self.v_proj = nn.Linear(cfg.d_model, self.n_kv_head * self.head_dim)
         self.proj = nn.Linear(cfg.d_model, cfg.d_model)
+        # gate has no bias: preceded by a norm, so a bias term is redundant
         self.gate = nn.Linear(cfg.d_model, self.n_head * self.head_dim, bias=False)
-        self.resid_drop= nn.Dropout(cfg.dropout)
-        
+        self.resid_drop = nn.Dropout(cfg.dropout)
+
         rope_cos, rope_sin = _build_rope_cache(cfg.block_size, self.head_dim, theta=cfg.rope_theta)
         self.register_buffer("rope_cos", rope_cos, persistent=False)
         self.register_buffer("rope_sin", rope_sin, persistent=False)
-        
-        # ------
-        # QK optimisation
-        # ------
-        # QK-gain param
+
+        # QK-norm: RMSNorm on q/k caps logit magnitude so softmax can't
+        # saturate. Per-head learnable gain restores the sharp-attention headroom that
+        # capping the norm would otherwise remove.
         self.q_gain = nn.Parameter(
             torch.full((self.n_head,), cfg.qk_gain, dtype=torch.float32)
         )
-        # QK norm
         self.q_norm = nn.RMSNorm(self.head_dim, elementwise_affine=False)
         self.k_norm = nn.RMSNorm(self.head_dim, elementwise_affine=False)
 
@@ -233,39 +233,53 @@ class CausalSelfAttention(nn.Module):
         q = self.q_proj(x).view(B, T, self.n_head, self.head_dim).transpose(1, 2)
         k = self.k_proj(x).view(B, T, self.n_kv_head, self.head_dim).transpose(1, 2)
         v = self.v_proj(x).view(B, T, self.n_kv_head, self.head_dim).transpose(1, 2)
-        
+
         q = self.q_norm(q) * self.q_gain.to(dtype=q.dtype)[None, :, None, None]
         k = self.k_norm(k)
 
+        # GQA: broadcast n_kv_head kv-heads to n_head query heads.
+        # n_kv_heads == n_head in the final config, so this is a no-op (n_rep=1,
+        # full multi-head attention); the path is kept as a tuned-away scale-down option.
         k = k.repeat_interleave(self.n_rep, dim=1)
         v = v.repeat_interleave(self.n_rep, dim=1)
-        
+
+        # RoPE: rotate q/k by position so the attention logit depends only
+        # on relative position, with no learned position table.
         cos = self.rope_cos[:T].to(dtype=q.dtype)
         sin = self.rope_sin[:T].to(dtype=q.dtype)
         q, k = apply_rope(q, k, cos, sin)
-        
+
         y = F.scaled_dot_product_attention(
             q, k, v,
             attn_mask=None,
             dropout_p=self.dropout if self.training else 0.0,
             is_causal=True
         )
-        
-        # XSA - Exclusive Self Attention mode
+
+        # XSA - Exclusive Self Attention: project out the component of the
+        # output aligned with the token's own (normalized) value vector. A token's own
+        # value is redundant with what the residual stream already carries, so removing
+        # it frees attention capacity; a token with nothing useful to attend to can attend
+        # to itself and have the projection neutralise it, acting as a free sink.
         Vn = torch.nn.functional.normalize(v, dim=-1)
         Z = y - (y - Vn).sum(dim=-1, keepdim=True) * Vn
-        
+
         Z = Z.transpose(1, 2).contiguous().view(B, T, C)
-        Z = Z * torch.sigmoid(self.gate(x))   # head-specific elementwise gate (C = n_head*head_dim)
+        # output gating: per-token, per-channel sigmoid gate on the
+        # attention output before the projection (Gemma-2 / GLU-style gating).
+        Z = Z * torch.sigmoid(self.gate(x))
         return self.resid_drop(self.proj(Z))
 
 class ReLUSquared(nn.Module):
+    """max(0, x)^2: cheaper than GELU and sparser than SwiGLU at this scale."""
     def forward(self, x):
         return F.relu(x).square()
 
 class MLP(nn.Module):
     def __init__(self, cfg: GPTConfig):
         super().__init__()
+        # bias=False on both linears: each is preceded by a norm, so the
+        # bias term is redundant weight that only costs memory traffic and optimizer state.
         self.net = nn.Sequential(
             nn.Linear(cfg.d_model, 4 * cfg.d_model, bias=False),
             ReLUSquared(),
@@ -314,11 +328,14 @@ class GPT(nn.Module):
             x = block(x)
         x = self.ln_f(x)
         logits = self.head(x)
-        
+
+        # logit soft-cap, Gemma-2 style: tanh squash keeps logits in
+        # [-cap, +cap], identity-like near zero, so the model can't drive easy
+        # predictions to near-certainty and starve the rest of the batch of gradient.
         if self.cfg.final_logit_cap is not None:
             cap = self.cfg.final_logit_cap
             logits = cap * torch.tanh(logits / cap)
-            
+
         if targets is None:
             loss = None
         else:
@@ -327,7 +344,7 @@ class GPT(nn.Module):
 
 def main():
     args = Hyperparameters()
-    
+
     run = wandb.init(
         entity="duylam-lee-the-university-of-sydney",
         project="mainrun",
@@ -346,35 +363,40 @@ def main():
                 setattr(args, k, v)
     else:
         args.n_head, args.n_kv_heads = nh, nkv
-    
+
     torch.manual_seed(args.seed)
     random.seed(args.seed)
-    
+
     global logger
     logger = configure_logging(args.log_file)
-    
+
     hyperparams_dict = vars(args)
     logger.log("hyperparameters_configured", **hyperparams_dict)
-    
+
     device = "cuda" if torch.cuda.is_available() else ("mps" if torch.mps.is_available() else "cpu")
     logger.log("device_info", device=device)
 
     train_titles, val_titles = get_titles(args.num_titles, args.seed, args.val_frac)
-    
+
     eos_token = "<eos>"
     caps_token = "<caps>"
     start_token = "<strt>"
-    tok = BPETokenizer(train_tokenizer(train_titles+val_titles, args.vocab_size, eos_token=eos_token, caps_token=caps_token, start_token=start_token))
-    
+    tok = BPETokenizer(train_tokenizer(
+        train_titles + val_titles, args.vocab_size,
+        eos_token=eos_token, caps_token=caps_token, start_token=start_token))
+
+    # CaseOps: factor casing out of the token stream into marker tokens
+    # so the lowercase form carries the semantics once, instead of the model learning
+    # "Rust" and "rust" as unrelated symbols.
     train_titles = token.apply_case(train_titles, start_token=start_token, caps_token=caps_token)
     val_titles = token.apply_case(val_titles, start_token=start_token, caps_token=caps_token)
-    
+
     train_text = eos_token.join(train_titles) + eos_token
     val_text = eos_token.join(val_titles) + eos_token
-    
+
     train_ids = torch.tensor(tok.encode(train_text), dtype=torch.long)
     val_ids = torch.tensor(tok.encode(val_text), dtype=torch.long)
-    
+
     batches = len(train_ids) // (args.block_size * args.batch_size)
     max_steps = args.epochs * batches
     eval_interval = batches // args.evals_per_epoch
@@ -400,13 +422,19 @@ def main():
     model = GPT(cfg).to(device)
     model_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     logger.log("model_info", parameters_count=model_params)
-    
+
+    # Muon + NorMuon + Polar Express: orthogonalizes 2D hidden-weight
+    # updates via Newton-Schulz (ns_steps, safety_factor), then NorMuon row-normalizes
+    # them (normalize_rows) to Adam-like RMS. Non-2D / embedding / head params route to
+    # an auxiliary Adam inside optim.Muon.
     opt = optim.Muon(model, lr=args.lr, weight_decay=args.weight_decay,
                       ns_steps=args.ns_steps, safety_factor=args.safety_factor,
                       normalize_rows=args.normalize_rows)
+    # LR warmup: ramp from warmup_start_factor of lr up to full lr before
+    # handing off to cosine annealing, so Muon's first steps aren't poorly conditioned.
     warmup_steps = max(1, round(args.warmup_frac * max_steps))
     warmup = torch.optim.lr_scheduler.LinearLR(
-        opt, start_factor=0.01, end_factor=1.0, total_iters=warmup_steps)
+        opt, start_factor=args.warmup_start_factor, end_factor=1.0, total_iters=warmup_steps)
     cosine = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=max_steps - warmup_steps)
     scheduler = torch.optim.lr_scheduler.SequentialLR(
         opt, [warmup, cosine], milestones=[warmup_steps])
@@ -422,7 +450,7 @@ def main():
                 losses += loss.item()
         model.train()
         return losses / len(val_text)
-    
+
     ptr = 0
     step = 0
     t0 = time.time()
@@ -433,12 +461,12 @@ def main():
             _, loss = model(xb, yb)
             opt.zero_grad(set_to_none=True)
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
             opt.step()
             scheduler.step()
 
             elapsed = time.time() - t0
-            
+
             logger.log("training_step",
                     step=step,
                     max_steps=max_steps,
