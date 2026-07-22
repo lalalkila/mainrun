@@ -6,6 +6,7 @@ from pathlib import Path
 
 try:
     import wandb
+    wandb = wandb if hasattr(wandb, "init") else None
 except ImportError:
     wandb = None
 import torch
