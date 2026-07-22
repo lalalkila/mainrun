@@ -33,7 +33,7 @@ class Hyperparameters:
     qk_gain: float = 3.0
     final_logit_cap: float = 15.0
     n_kv_heads: int = 8 # normal attention
-    rope_theta: float = 10_000.0
+    rope_theta: float = 1000.0
     
     epochs: int = 7
     seed: int = 1337
@@ -288,7 +288,7 @@ class GPT(nn.Module):
         self.token_emb = nn.Embedding(cfg.vocab_size, cfg.d_model)
         self.drop      = nn.Dropout(cfg.dropout)
         self.blocks    = nn.ModuleList([Block(cfg) for _ in range(cfg.n_layer)])
-        self.ln_f      = nn.LayerNorm(cfg.d_model)
+        self.ln_f      = nn.RMSNorm(cfg.d_model)
         self.head      = nn.Linear(cfg.d_model, cfg.vocab_size, bias=False)
 
         self.apply(self._init_weights)
@@ -304,8 +304,7 @@ class GPT(nn.Module):
     def forward(self, idx: torch.Tensor, targets: torch.Tensor | None = None):
         B, T = idx.size()
         tok = self.token_emb(idx)
-        pos = self.pos_emb[:, :T, :]
-        x = self.drop(tok + pos)
+        x = self.drop(tok)
         for block in self.blocks:
             x = block(x)
         x = self.ln_f(x)
