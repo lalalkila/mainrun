@@ -28,6 +28,7 @@ class Hyperparameters:
     warmup_frac: float = 0.12  # linear LR warmup as fraction of max_steps
     ns_steps: int = 5  # Newton-Schulz / Polar Express orthogonalization steps
     safety_factor: float = 1.01  # Polar Express norm-cushion (arXiv:2505.16932)
+    normalize_rows: bool = True  # NorMuon row-wise second-moment normalization
     evals_per_epoch: int = 3
     
     qk_gain: float = 3.0
@@ -393,7 +394,8 @@ def main():
     logger.log("model_info", parameters_count=model_params)
     
     opt = optim.Muon(model, lr=args.lr, weight_decay=args.weight_decay,
-                      ns_steps=args.ns_steps, safety_factor=args.safety_factor)
+                      ns_steps=args.ns_steps, safety_factor=args.safety_factor,
+                      normalize_rows=args.normalize_rows)
     warmup_steps = max(1, round(args.warmup_frac * max_steps))
     warmup = torch.optim.lr_scheduler.LinearLR(
         opt, start_factor=0.01, end_factor=1.0, total_iters=warmup_steps)
